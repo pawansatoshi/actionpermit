@@ -6,6 +6,15 @@ class Decision(str, Enum):
     ALLOW = "ALLOW"
     DENY = "DENY"
 
+class Lifecycle(str, Enum):
+    RECEIVED = "RECEIVED"
+    VALIDATING = "VALIDATING"
+    POLICY_EVALUATED = "POLICY_EVALUATED"
+    DENIED = "DENIED"
+    EXECUTING = "EXECUTING"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
+
 class ActionRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     request_id: str = Field(min_length=8, max_length=128)
@@ -20,6 +29,7 @@ class ActionRequest(BaseModel):
 class DecisionResponse(BaseModel):
     request_id: str
     decision: Decision
+    lifecycle: Lifecycle
     reasons: list[str]
     execution_id: str | None = None
     evidence_id: str
