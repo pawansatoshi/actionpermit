@@ -1,0 +1,5 @@
+[
+  {"invoice_id":"INV-1001","vendor":"Northstar Labs","amount":1250,"status":"approved"},
+  {"invoice_id":"INV-1002","vendor":"Pine Systems","amount":840,"status":"approved"},
+  {"invoice_id":"INV-1003","vendor":"Cedar Cloud","amount":2190,"status":"pending"}
+]
