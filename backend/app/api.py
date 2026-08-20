@@ -1,14 +1,21 @@
 import json
 import os
+from datetime import datetime, timezone
 from uuid import uuid4
 from fastapi import APIRouter, Header, HTTPException
-from .models import ActionRequest, DecisionResponse, Decision, Lifecycle
+from .models import ActionRequest, DecisionResponse, Decision, Lifecycle, ApprovalRequest
 from .policy import authorize
 from .runtime import execute_sandbox_action
 
 router = APIRouter(prefix="/api/v1", tags=["action"])
 EVIDENCE: dict[str, dict] = {}
 REQUESTS: dict[str, DecisionResponse] = {}
+APPROVALS: dict[str, dict] = {}
+EVENTS: list[dict] = []
+
+
+def _event(event: str, request_id: str, **data):
+    EVENTS.append({"event": event, "request_id": request_id, "timestamp": datetime.now(timezone.utc).isoformat(), **data})
 
 
 def _reason_with_gemini(request: ActionRequest, decision: str, reasons: list[str]) -> str | None:
@@ -17,11 +24,36 @@ def _reason_with_gemini(request: ActionRequest, decision: str, reasons: list[str
     try:
         from google import genai
         client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
-        prompt = json.dumps({"task":"Explain the authorization decision in one concise paragraph. Never change it.","request":request.model_dump(),"deterministic_decision":decision,"policy_reasons":reasons})
+        prompt = json.dumps({"task": "Explain the authorization decision in one concise paragraph. Never change it.", "request": request.model_dump(), "deterministic_decision": decision, "policy_reasons": reasons})
         response = client.models.generate_content(model=os.getenv("GEMINI_MODEL", "gemini-3.5-flash"), contents=prompt)
         return response.text[:1000] if response.text else None
     except Exception:
         return None
+
+
+def _execute(request: ActionRequest, response: DecisionResponse) -> DecisionResponse:
+    _event("EXECUTION_STARTED", request.request_id, evidence_id=response.evidence_id)
+    try:
+        result = execute_sandbox_action(request.action, request.resource, request.requested_scope)
+    except Exception as exc:
+        response.lifecycle = Lifecycle.FAILED
+        response.decision = Decision.DENY
+        response.reasons = ["execution_exception"]
+        _event("EXECUTION_FAILED", request.request_id, error=type(exc).__name__)
+        return response
+    if not result.verified:
+        response.lifecycle = Lifecycle.FAILED
+        response.decision = Decision.DENY
+        response.reasons = ["execution_verification_failed"]
+        _event("EXECUTION_FAILED", request.request_id, reason="verification_failed")
+        return response
+    response.execution_id = result.execution_id
+    response.lifecycle = Lifecycle.COMPLETED
+    _event("EXECUTION_COMPLETED", request.request_id, execution_id=result.execution_id)
+    EVIDENCE[response.evidence_id]["execution_output"] = result.output
+    EVIDENCE[response.evidence_id]["verified"] = True
+    return response
+
 
 @router.post("/decisions", response_model=DecisionResponse)
 def decide(request: ActionRequest, x_request_id: str | None = Header(default=None)) -> DecisionResponse:
@@ -31,36 +63,66 @@ def decide(request: ActionRequest, x_request_id: str | None = Header(default=Non
     if existing is not None:
         return existing
 
-    decision, reasons = authorize(request)
-    lifecycle = Lifecycle.POLICY_EVALUATED
-    execution_id = None
-    verified = False
-    execution_output = None
-
-    if decision is Decision.ALLOW:
-        lifecycle = Lifecycle.EXECUTING
-        result = execute_sandbox_action(request.action, request.resource, request.requested_scope)
-        execution_id, verified, execution_output = result.execution_id, result.verified, result.output
-        if not verified:
-            decision = Decision.DENY
-            reasons = ["execution_verification_failed"]
-            lifecycle = Lifecycle.FAILED
-            execution_id = None
-        else:
-            lifecycle = Lifecycle.COMPLETED
-    else:
-        lifecycle = Lifecycle.DENIED
-
+    _event("INTENT_RECEIVED", request.request_id, action=request.action)
+    result = authorize(request)
+    _event("POLICY_EVALUATED", request.request_id, decision=result.decision.value, risk_score=result.risk_score)
     evidence_id = str(uuid4())
-    reasoning = _reason_with_gemini(request, decision.value, reasons)
-    response = DecisionResponse(request_id=request.request_id, decision=decision, lifecycle=lifecycle, reasons=reasons, execution_id=execution_id, evidence_id=evidence_id, agent_reasoning=reasoning)
+    response = DecisionResponse(request_id=request.request_id, decision=result.decision, lifecycle=Lifecycle.POLICY_EVALUATED, reasons=result.reasons, risk_score=result.risk_score, risk_level=result.risk_level, evidence_id=evidence_id)
+    EVIDENCE[evidence_id] = {"request_id": request.request_id, "decision": result.decision.value, "lifecycle": response.lifecycle.value, "reasons": result.reasons, "risk_score": result.risk_score, "risk_level": result.risk_level, "verified": False}
+
+    if result.decision is Decision.ALLOW:
+        response.lifecycle = Lifecycle.EXECUTING
+        response = _execute(request, response)
+    elif result.decision is Decision.REQUIRE_APPROVAL:
+        approval_id = str(uuid4())
+        response.approval_id = approval_id
+        response.lifecycle = Lifecycle.APPROVAL_REQUIRED
+        APPROVALS[approval_id] = {"request": request, "evidence_id": evidence_id, "status": "PENDING", "created_at": datetime.now(timezone.utc).isoformat()}
+        _event("APPROVAL_REQUESTED", request.request_id, approval_id=approval_id)
+    else:
+        response.lifecycle = Lifecycle.DENIED
+        _event("ACTION_DENIED", request.request_id, reasons=result.reasons)
+
+    response.agent_reasoning = _reason_with_gemini(request, response.decision.value, response.reasons)
     REQUESTS[request.request_id] = response
-    EVIDENCE[evidence_id] = {"request_id":request.request_id,"decision":decision.value,"lifecycle":lifecycle.value,"reasons":reasons,"execution_id":execution_id,"verified":verified,"execution_output":execution_output}
+    EVIDENCE[evidence_id].update({"decision": response.decision.value, "lifecycle": response.lifecycle.value, "approval_id": response.approval_id, "execution_id": response.execution_id, "agent_reasoning": response.agent_reasoning})
     return response
+
+
+@router.post("/approvals/{approval_id}", response_model=DecisionResponse)
+def resolve_approval(approval_id: str, approval: ApprovalRequest) -> DecisionResponse:
+    item = APPROVALS.get(approval_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail="approval_not_found")
+    if item["status"] != "PENDING":
+        raise HTTPException(status_code=409, detail="approval_already_resolved")
+    request: ActionRequest = item["request"]
+    response = REQUESTS[request.request_id]
+    item.update({"status": "APPROVED" if approval.approved else "REJECTED", "approver": approval.approver, "reason": approval.reason})
+    if not approval.approved:
+        response.decision = Decision.DENY
+        response.lifecycle = Lifecycle.DENIED
+        response.reasons = ["human_rejected", approval.reason or "approval_rejected"]
+        _event("APPROVAL_REJECTED", request.request_id, approval_id=approval_id, approver=approval.approver)
+    else:
+        response.decision = Decision.ALLOW
+        response.lifecycle = Lifecycle.APPROVED
+        _event("APPROVAL_GRANTED", request.request_id, approval_id=approval_id, approver=approval.approver)
+        response.lifecycle = Lifecycle.EXECUTING
+        response = _execute(request, response)
+    EVIDENCE[response.evidence_id].update({"decision": response.decision.value, "lifecycle": response.lifecycle.value, "approval_status": item["status"], "approver": approval.approver, "approval_reason": approval.reason, "execution_id": response.execution_id})
+    REQUESTS[request.request_id] = response
+    return response
+
 
 @router.get("/audit/{evidence_id}")
 def audit(evidence_id: str) -> dict:
     item = EVIDENCE.get(evidence_id)
     if item is None:
         raise HTTPException(status_code=404, detail="evidence_not_found")
-    return item
+    return {**item, "events": [e for e in EVENTS if e["request_id"] == item["request_id"]]}
+
+
+@router.get("/audit")
+def audit_index() -> list[dict]:
+    return list(EVIDENCE.values())
