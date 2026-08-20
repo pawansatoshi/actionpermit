@@ -1,8 +1,7 @@
-import json
-import os
 from datetime import datetime, timezone
 from uuid import uuid4
 from fastapi import APIRouter, Header, HTTPException
+from .agent import reason_about
 from .models import ActionRequest, DecisionResponse, Decision, Lifecycle, ApprovalRequest
 from .policy import authorize
 from .runtime import execute_sandbox_action
@@ -16,19 +15,6 @@ EVENTS: list[dict] = []
 
 def _event(event: str, request_id: str, **data):
     EVENTS.append({"event": event, "request_id": request_id, "timestamp": datetime.now(timezone.utc).isoformat(), **data})
-
-
-def _reason_with_gemini(request: ActionRequest, decision: str, reasons: list[str]) -> str | None:
-    if not os.getenv("GEMINI_API_KEY"):
-        return None
-    try:
-        from google import genai
-        client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
-        prompt = json.dumps({"task": "Explain the authorization decision in one concise paragraph. Never change it.", "request": request.model_dump(), "deterministic_decision": decision, "policy_reasons": reasons})
-        response = client.models.generate_content(model=os.getenv("GEMINI_MODEL", "gemini-3.5-flash"), contents=prompt)
-        return response.text[:1000] if response.text else None
-    except Exception:
-        return None
 
 
 def _execute(request: ActionRequest, response: DecisionResponse) -> DecisionResponse:
@@ -83,7 +69,7 @@ def decide(request: ActionRequest, x_request_id: str | None = Header(default=Non
         response.lifecycle = Lifecycle.DENIED
         _event("ACTION_DENIED", request.request_id, reasons=result.reasons)
 
-    response.agent_reasoning = _reason_with_gemini(request, response.decision.value, response.reasons)
+    response.agent_reasoning = reason_about(request.model_dump(), response.decision.value, response.reasons)
     REQUESTS[request.request_id] = response
     EVIDENCE[evidence_id].update({"decision": response.decision.value, "lifecycle": response.lifecycle.value, "approval_id": response.approval_id, "execution_id": response.execution_id, "agent_reasoning": response.agent_reasoning})
     return response
