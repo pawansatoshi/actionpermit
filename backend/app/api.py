@@ -1,4 +1,6 @@
 from datetime import datetime, timezone
+from hashlib import sha256
+import json
 from uuid import uuid4
 from fastapi import APIRouter, Header, HTTPException
 from .agent import reason_about
@@ -15,6 +17,11 @@ EVENTS: list[dict] = []
 
 def _event(event: str, request_id: str, **data):
     EVENTS.append({"event": event, "request_id": request_id, "timestamp": datetime.now(timezone.utc).isoformat(), **data})
+
+
+def _request_fingerprint(request: ActionRequest) -> str:
+    payload = json.dumps(request.model_dump(mode="json"), sort_keys=True, separators=(",", ":"))
+    return sha256(payload.encode("utf-8")).hexdigest()
 
 
 def _execute(request: ActionRequest, response: DecisionResponse) -> DecisionResponse:
@@ -63,7 +70,7 @@ def decide(request: ActionRequest, x_request_id: str | None = Header(default=Non
         approval_id = str(uuid4())
         response.approval_id = approval_id
         response.lifecycle = Lifecycle.APPROVAL_REQUIRED
-        APPROVALS[approval_id] = {"request": request, "evidence_id": evidence_id, "status": "PENDING", "created_at": datetime.now(timezone.utc).isoformat()}
+        APPROVALS[approval_id] = {"request": request, "request_fingerprint": _request_fingerprint(request), "evidence_id": evidence_id, "status": "PENDING", "created_at": datetime.now(timezone.utc).isoformat()}
         _event("APPROVAL_REQUESTED", request.request_id, approval_id=approval_id)
     else:
         response.lifecycle = Lifecycle.DENIED
@@ -83,7 +90,11 @@ def resolve_approval(approval_id: str, approval: ApprovalRequest) -> DecisionRes
     if item["status"] != "PENDING":
         raise HTTPException(status_code=409, detail="approval_already_resolved")
     request: ActionRequest = item["request"]
-    response = REQUESTS[request.request_id]
+    if item.get("request_fingerprint") != _request_fingerprint(request):
+        raise HTTPException(status_code=409, detail="approval_binding_mismatch")
+    response = REQUESTS.get(request.request_id)
+    if response is None or response.approval_id != approval_id or response.evidence_id != item["evidence_id"]:
+        raise HTTPException(status_code=409, detail="approval_binding_mismatch")
     item.update({"status": "APPROVED" if approval.approved else "REJECTED", "approver": approval.approver, "reason": approval.reason})
     if not approval.approved:
         response.decision = Decision.DENY
