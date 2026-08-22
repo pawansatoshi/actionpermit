@@ -53,11 +53,10 @@ def test_18_14_gemini_policy_override_cannot_grant(monkeypatch):
 
 
 def test_18_15_policy_failure_fails_closed(monkeypatch):
-    reset_state()
-    monkeypatch.setattr(api, 'authorize', lambda _request: (_ for _ in ()).throw(RuntimeError('policy unavailable')))
-    response = client.post('/api/v1/decisions', json=base_request(request_id='req-policy-fail-1'))
-    assert response.status_code == 500
-    assert not any(e['event'] == 'EXECUTION_COMPLETED' for e in api.EVENTS)
+    reset_state(); monkeypatch.setattr(api, 'authorize', lambda _request: (_ for _ in ()).throw(RuntimeError('policy unavailable')))
+    response = client.post('/api/v1/decisions', json=base_request(request_id='req-policy-fail-1')).json()
+    assert response['decision'] == 'DENY'; assert response['lifecycle'] == 'DENIED'; assert response['execution_id'] is None
+    assert any(e['event'] == 'POLICY_EVALUATION_FAILED' for e in api.EVENTS); assert not any(e['event'] == 'EXECUTION_COMPLETED' for e in api.EVENTS)
 
 
 def test_18_16_executor_failure_denies_and_never_completes(monkeypatch):
