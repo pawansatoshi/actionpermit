@@ -7,13 +7,18 @@
 - [x] Capability and scope enforcement
 - [x] Risk scoring
 - [x] Human approval gate
+- [x] Approval replay protection
+- [x] Approval request binding
+- [x] Approval expiry / timeout
 - [x] Registered executor
 - [x] Execution verification
 - [x] Evidence and audit trail
+- [x] Tamper-evident audit event chain + integrity endpoint
 - [x] Gemini + Google ADK boundary
 - [x] Adversarial security suite
 - [x] Health/readiness endpoints
 - [x] Request correlation headers
+- [x] Configurable CORS and security headers
 - [x] Cloud Run Docker target
 - [x] Reproducibility script
 
