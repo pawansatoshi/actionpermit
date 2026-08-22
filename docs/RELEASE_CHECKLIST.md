@@ -19,6 +19,8 @@
 - [x] Health/readiness endpoints
 - [x] Request correlation headers
 - [x] Configurable CORS and security headers
+- [x] Responsive Taskmaster demo UX
+- [x] Evidence inspection and audit-integrity UI
 - [x] Cloud Run Docker target
 - [x] Reproducibility script
 
