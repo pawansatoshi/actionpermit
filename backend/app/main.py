@@ -7,7 +7,7 @@ from .api import router
 
 app = FastAPI(title="ActionPermit", version="1.0.0")
 origins = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "").split(",") if o.strip()]
-app.add_middleware(CORSMiddleware, allow_origins=origins or ["*"], allow_credentials=False, allow_methods=["GET", "POST", "OPTIONS"], allow_headers=["*"])
+app.add_middleware(CORSMiddleware, allow_origins=origins, allow_credentials=False, allow_methods=["GET", "POST", "OPTIONS"], allow_headers=["*"])
 
 @app.middleware("http")
 async def security_headers(request: Request, call_next):
@@ -32,4 +32,4 @@ def readyz():
 
 @app.get("/")
 def root():
-    return FileResponse(Path(__file__).resolve().parents[1] / "frontend" / "index.html")
+    return FileResponse(Path(__file__).resolve().parents[2] / "frontend" / "index.html")
