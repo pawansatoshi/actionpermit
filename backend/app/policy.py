@@ -38,7 +38,7 @@ def risk_for(request: ActionRequest) -> tuple[int, str, list[str]]:
         score += 25
         factors.append("external_destination")
     if request.context.get("sensitive"):
-        score += 20
+        score += 25
         factors.append("sensitive_resource")
     score = min(score, 100)
     level = "LOW" if score <= 30 else "MEDIUM" if score <= 60 else "HIGH" if score <= 80 else "CRITICAL"
