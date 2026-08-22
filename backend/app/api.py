@@ -5,7 +5,7 @@ from uuid import uuid4
 from fastapi import APIRouter, Header, HTTPException
 from .agent import reason_about
 from .models import ActionRequest, DecisionResponse, Decision, Lifecycle, ApprovalRequest
-from .policy import authorize
+from .policy import authorize, PolicyResult
 from .runtime import execute_sandbox_action
 
 router = APIRouter(prefix="/api/v1", tags=["action"])
@@ -57,7 +57,11 @@ def decide(request: ActionRequest, x_request_id: str | None = Header(default=Non
         return existing
 
     _event("INTENT_RECEIVED", request.request_id, action=request.action)
-    result = authorize(request)
+    try:
+        result = authorize(request)
+    except Exception as exc:
+        result = PolicyResult(Decision.DENY, ["policy_evaluation_failed"], 100, "CRITICAL")
+        _event("POLICY_EVALUATION_FAILED", request.request_id, error=type(exc).__name__)
     _event("POLICY_EVALUATED", request.request_id, decision=result.decision.value, risk_score=result.risk_score)
     evidence_id = str(uuid4())
     response = DecisionResponse(request_id=request.request_id, decision=result.decision, lifecycle=Lifecycle.POLICY_EVALUATED, reasons=result.reasons, risk_score=result.risk_score, risk_level=result.risk_level, evidence_id=evidence_id)
