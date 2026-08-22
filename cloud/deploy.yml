@@ -28,6 +28,17 @@ jobs:
 
       - uses: google-github-actions/setup-gcloud@v2
 
+      - name: Ensure Artifact Registry repository exists
+        run: |
+          gcloud artifacts repositories describe actionpermit \
+            --location="$REGION" \
+            --project="$PROJECT_ID" >/dev/null 2>&1 || \
+          gcloud artifacts repositories create actionpermit \
+            --repository-format=docker \
+            --location="$REGION" \
+            --project="$PROJECT_ID" \
+            --description="ActionPermit production images"
+
       - name: Configure Docker authentication
         run: gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
 
@@ -42,7 +53,8 @@ jobs:
             --region "$REGION" \
             --platform managed \
             --allow-unauthenticated \
-            --set-env-vars "GEMINI_MODEL=gemini-3.6-flash"
+            --set-env-vars "GEMINI_MODEL=gemini-3.6-flash" \
+            --set-secrets "GEMINI_API_KEY=actionpermit-gemini-api-key:latest"
 
       - name: Capture service URL
         id: url
