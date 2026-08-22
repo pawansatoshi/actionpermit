@@ -1,6 +1,7 @@
-from datetime import datetime, timezone
-from hashlib import sha256
 import json
+import os
+from datetime import datetime, timezone, timedelta
+from hashlib import sha256
 from uuid import uuid4
 from fastapi import APIRouter, Header, HTTPException
 from .agent import reason_about
@@ -13,10 +14,16 @@ EVIDENCE: dict[str, dict] = {}
 REQUESTS: dict[str, DecisionResponse] = {}
 APPROVALS: dict[str, dict] = {}
 EVENTS: list[dict] = []
+APPROVAL_TTL_SECONDS = max(60, int(os.getenv("APPROVAL_TTL_SECONDS", "900")))
 
 
 def _event(event: str, request_id: str, **data):
-    EVENTS.append({"event": event, "request_id": request_id, "timestamp": datetime.now(timezone.utc).isoformat(), **data})
+    payload = {"event": event, "request_id": request_id, "timestamp": datetime.now(timezone.utc).isoformat(), **data}
+    previous = EVENTS[-1]["hash"] if EVENTS else "GENESIS"
+    canonical = json.dumps({**payload, "previous_hash": previous}, sort_keys=True, separators=(",", ":"))
+    payload["previous_hash"] = previous
+    payload["hash"] = sha256(canonical.encode("utf-8")).hexdigest()
+    EVENTS.append(payload)
 
 
 def _request_fingerprint(request: ActionRequest) -> str:
@@ -48,6 +55,17 @@ def _execute(request: ActionRequest, response: DecisionResponse) -> DecisionResp
     return response
 
 
+def _expire_approval(item: dict, response: DecisionResponse, request: ActionRequest) -> DecisionResponse:
+    item["status"] = "EXPIRED"
+    response.decision = Decision.DENY
+    response.lifecycle = Lifecycle.DENIED
+    response.reasons = ["approval_expired"]
+    _event("APPROVAL_EXPIRED", request.request_id, approval_id=response.approval_id)
+    EVIDENCE[response.evidence_id].update({"decision": response.decision.value, "lifecycle": response.lifecycle.value, "approval_status": "EXPIRED"})
+    REQUESTS[request.request_id] = response
+    return response
+
+
 @router.post("/decisions", response_model=DecisionResponse)
 def decide(request: ActionRequest, x_request_id: str | None = Header(default=None)) -> DecisionResponse:
     if x_request_id and x_request_id != request.request_id:
@@ -55,7 +73,6 @@ def decide(request: ActionRequest, x_request_id: str | None = Header(default=Non
     existing = REQUESTS.get(request.request_id)
     if existing is not None:
         return existing
-
     _event("INTENT_RECEIVED", request.request_id, action=request.action)
     try:
         result = authorize(request)
@@ -66,7 +83,6 @@ def decide(request: ActionRequest, x_request_id: str | None = Header(default=Non
     evidence_id = str(uuid4())
     response = DecisionResponse(request_id=request.request_id, decision=result.decision, lifecycle=Lifecycle.POLICY_EVALUATED, reasons=result.reasons, risk_score=result.risk_score, risk_level=result.risk_level, evidence_id=evidence_id)
     EVIDENCE[evidence_id] = {"request_id": request.request_id, "decision": result.decision.value, "lifecycle": response.lifecycle.value, "reasons": result.reasons, "risk_score": result.risk_score, "risk_level": result.risk_level, "verified": False}
-
     if result.decision is Decision.ALLOW:
         response.lifecycle = Lifecycle.EXECUTING
         response = _execute(request, response)
@@ -74,12 +90,12 @@ def decide(request: ActionRequest, x_request_id: str | None = Header(default=Non
         approval_id = str(uuid4())
         response.approval_id = approval_id
         response.lifecycle = Lifecycle.APPROVAL_REQUIRED
-        APPROVALS[approval_id] = {"request": request, "request_fingerprint": _request_fingerprint(request), "evidence_id": evidence_id, "status": "PENDING", "created_at": datetime.now(timezone.utc).isoformat()}
-        _event("APPROVAL_REQUESTED", request.request_id, approval_id=approval_id)
+        created_at = datetime.now(timezone.utc)
+        APPROVALS[approval_id] = {"request": request, "request_fingerprint": _request_fingerprint(request), "evidence_id": evidence_id, "status": "PENDING", "created_at": created_at.isoformat(), "expires_at": (created_at + timedelta(seconds=APPROVAL_TTL_SECONDS)).isoformat()}
+        _event("APPROVAL_REQUESTED", request.request_id, approval_id=approval_id, expires_at=APPROVALS[approval_id]["expires_at"])
     else:
         response.lifecycle = Lifecycle.DENIED
         _event("ACTION_DENIED", request.request_id, reasons=result.reasons)
-
     response.agent_reasoning = reason_about(request.model_dump(), response.decision.value, response.reasons)
     REQUESTS[request.request_id] = response
     EVIDENCE[evidence_id].update({"decision": response.decision.value, "lifecycle": response.lifecycle.value, "approval_id": response.approval_id, "execution_id": response.execution_id, "agent_reasoning": response.agent_reasoning})
@@ -94,11 +110,13 @@ def resolve_approval(approval_id: str, approval: ApprovalRequest) -> DecisionRes
     if item["status"] != "PENDING":
         raise HTTPException(status_code=409, detail="approval_already_resolved")
     request: ActionRequest = item["request"]
-    if item.get("request_fingerprint") != _request_fingerprint(request):
-        raise HTTPException(status_code=409, detail="approval_binding_mismatch")
     response = REQUESTS.get(request.request_id)
     if response is None or response.approval_id != approval_id or response.evidence_id != item["evidence_id"]:
         raise HTTPException(status_code=409, detail="approval_binding_mismatch")
+    if item.get("request_fingerprint") != _request_fingerprint(request):
+        raise HTTPException(status_code=409, detail="approval_binding_mismatch")
+    if datetime.now(timezone.utc) >= datetime.fromisoformat(item["expires_at"]):
+        return _expire_approval(item, response, request)
     item.update({"status": "APPROVED" if approval.approved else "REJECTED", "approver": approval.approver, "reason": approval.reason})
     if not approval.approved:
         response.decision = Decision.DENY
@@ -127,3 +145,17 @@ def audit(evidence_id: str) -> dict:
 @router.get("/audit")
 def audit_index() -> list[dict]:
     return list(EVIDENCE.values())
+
+
+@router.get("/audit/integrity")
+def audit_integrity() -> dict:
+    previous = "GENESIS"
+    for index, event in enumerate(EVENTS):
+        supplied_hash = event.get("hash")
+        payload = {k: v for k, v in event.items() if k != "hash"}
+        canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        expected = sha256(canonical.encode("utf-8")).hexdigest()
+        if event.get("previous_hash") != previous or supplied_hash != expected:
+            return {"valid": False, "broken_at": index}
+        previous = supplied_hash
+    return {"valid": True, "events": len(EVENTS), "head": previous}
