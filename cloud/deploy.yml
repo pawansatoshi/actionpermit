@@ -11,6 +11,7 @@ env:
   SERVICE_NAME: actionpermit
   REGION: ${{ vars.GCP_REGION }}
   PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+  IMAGE: ${{ vars.GCP_REGION }}-docker.pkg.dev/${{ vars.GCP_PROJECT_ID }}/actionpermit/actionpermit:${{ github.sha }}
 
 jobs:
   deploy:
@@ -27,12 +28,31 @@ jobs:
 
       - uses: google-github-actions/setup-gcloud@v2
 
-      - name: Build and deploy to Cloud Run
+      - name: Configure Docker authentication
+        run: gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
+
+      - name: Build container
+        run: gcloud builds submit --tag "$IMAGE" --project "$PROJECT_ID" --file cloud/Dockerfile .
+
+      - name: Deploy container to Cloud Run
         run: |
           gcloud run deploy "$SERVICE_NAME" \
-            --source . \
+            --image "$IMAGE" \
             --project "$PROJECT_ID" \
             --region "$REGION" \
             --platform managed \
             --allow-unauthenticated \
             --set-env-vars "GEMINI_MODEL=gemini-3.6-flash"
+
+      - name: Capture service URL
+        id: url
+        run: echo "url=$(gcloud run services describe "$SERVICE_NAME" --project "$PROJECT_ID" --region "$REGION" --format='value(status.url)')" >> "$GITHUB_OUTPUT"
+
+      - name: Verify live health endpoints
+        env:
+          SERVICE_URL: ${{ steps.url.outputs.url }}
+        run: |
+          curl --fail --silent --show-error --retry 10 --retry-delay 3 "$SERVICE_URL/healthz"
+          curl --fail --silent --show-error --retry 10 --retry-delay 3 "$SERVICE_URL/readyz"
+          curl --fail --silent --show-error --retry 10 --retry-delay 3 "$SERVICE_URL/"
+          echo "Cloud Run live verification passed: $SERVICE_URL"
