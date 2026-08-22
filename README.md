@@ -8,26 +8,19 @@ ActionPermit is a Taskmaster-track submission for the All Things Agentic Hackath
 
 ## Workflow
 
-`request → identity → credential → capability → scope → risk → policy → allow / conditional / approval / deny → execute → verify → audit`
+`request → identity → credential → capability → scope → risk → policy → allow / approval / deny → execute → verify → audit`
 
 ## Stack
 
 - Gemini 3.6 Flash (configurable server-side)
 - Google Agent Development Kit (ADK)
 - FastAPI
-- Cloud Run target
+- Cloud Run
 - Responsive browser UI
 
 ## Security boundary
 
 The LLM cannot grant permission or directly invoke privileged side effects. Every action passes deterministic server-side authorization first. The default posture is deny. Approved actions execute only through registered executor capabilities, and successful execution requires verification.
-
-## Decision model
-
-- `ALLOW` — low-risk action may execute
-- `ALLOW_WITH_CONDITIONS` — reserved for constrained policy extensions
-- `REQUIRE_APPROVAL` — human authorization is required
-- `DENY` — policy or risk blocks execution
 
 ## Demo action
 
@@ -54,16 +47,20 @@ cd backend
 pytest -q
 ```
 
-GitHub Actions runs the backend test suite on pushes and pull requests.
+The CI workflow runs tests and builds the Cloud Run image on pushes and pull requests.
 
 ## Cloud Run
 
-Build from the repository root with `cloud/Dockerfile`. Configure the Gemini credential as a server-side Cloud Run secret/environment variable. Never place credentials in the frontend.
+Build from the repository root with `cloud/Dockerfile`. A manual GitHub Actions deployment workflow is provided at `cloud/deploy.yml` and uses GitHub OIDC/Workload Identity Federation. Configure the Gemini credential as a server-side secret. Never place credentials in frontend JavaScript.
 
-## Release discipline
+See `cloud/README.md` for deployment prerequisites and post-deployment verification.
 
-A release is not considered production-ready until the complete release gate has been executed and recorded: tests, adversarial security checks, Cloud Run deployment verification, failure-path verification, reproducibility, and final demo verification.
+## Architecture and demo
+
+- `docs/ARCHITECTURE.md` — trust boundaries and lifecycle
+- `docs/DEMO_SCRIPT.md` — four-minute Taskmaster demo
+- `docs/RELEASE_CHECKLIST.md` — final engineering and submission gate
 
 ## Status
 
-**Core build in progress.** Policy, risk, approval, deterministic execution, audit events, ADK agent wiring, responsive workflow UI, and CI test automation are implemented. Deployment and independent release-gate verification remain before the project can be declared ready for final feature additions.
+**Core implementation and security hardening complete.** Cloud Run packaging, deployment workflow, health/readiness checks, reproducibility tooling, architecture documentation, demo script, and release checklist are implemented. Actual Google Cloud deployment, live Gemini verification, and final release evidence remain before production-ready status can be declared.
